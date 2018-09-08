@@ -27,43 +27,39 @@ bool operator<(FormulaKind k1, FormulaKind k2) {
 
 Formula::Formula() : Formula{Formula::True().ptr_} {}
 
-Formula::Formula(const Formula& f) {
-  assert(f.ptr_ != nullptr);
-  f.ptr_->increase_rc();
-  ptr_ = f.ptr_;
+Formula::Formula(const Formula& f) : ptr_{f.ptr_} {
+  assert(ptr_ != nullptr);
+  ptr_->increase_rc();
 }
 
 Formula& Formula::operator=(const Formula& f) {
   assert(f.ptr_ != nullptr);
   f.ptr_->increase_rc();
-  assert(ptr_ != nullptr);
-  if (ptr_->decrease_rc() == 0) {
-    delete ptr_;
+  if (ptr_) {
+    ptr_->decrease_rc();
   }
   ptr_ = f.ptr_;
   return *this;
 }
 
-Formula::Formula(Formula&& f) noexcept {
-  assert(f.ptr_ != nullptr);
-  ptr_ = f.ptr_;
+Formula::Formula(Formula&& f) noexcept : ptr_{f.ptr_} {
+  assert(ptr_ != nullptr);
   f.ptr_ = nullptr;
 }
 
 Formula& Formula::operator=(Formula&& f) noexcept {
-  assert(ptr_ != nullptr);
-  if (ptr_->decrease_rc() == 0) {
-    delete ptr_;
-  }
   assert(f.ptr_ != nullptr);
+  if (ptr_) {
+    ptr_->decrease_rc();
+  }
   ptr_ = f.ptr_;
   f.ptr_ = nullptr;
   return *this;
 }
 
 Formula::~Formula() {
-  if (ptr_ && ptr_->decrease_rc() == 0) {
-    delete ptr_;
+  if (ptr_) {
+    ptr_->decrease_rc();
   }
 }
 
@@ -81,9 +77,12 @@ size_t Formula::get_hash() const {
   return ptr_->get_hash();
 }
 
-Variables Formula::GetFreeVariables() const {
+const Variables& Formula::GetFreeVariables() const {
   assert(ptr_ != nullptr);
-  return ptr_->GetFreeVariables();
+  if (!free_variables_) {
+    free_variables_ = ptr_->GetFreeVariables();
+  }
+  return *free_variables_;
 }
 
 bool Formula::EqualTo(const Formula& f) const {

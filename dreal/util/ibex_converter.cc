@@ -8,15 +8,45 @@
 #include "dreal/util/interval.h"
 #include "dreal/util/logging.h"
 #include "dreal/util/math.h"
+#include "dreal/util/stat.h"
+#include "dreal/util/timer.h"
 
 namespace dreal {
 
+using std::cout;
 using std::ostringstream;
 using std::pair;
 using std::vector;
 
 using ibex::ExprCtr;
 using ibex::ExprNode;
+
+namespace {
+// A class to show statistics information at destruction.
+class IbexConverterStat : public Stat {
+ public:
+  explicit IbexConverterStat(const bool enabled) : Stat{enabled} {}
+  IbexConverterStat(const IbexConverterStat&) = default;
+  IbexConverterStat(IbexConverterStat&&) = default;
+  IbexConverterStat& operator=(const IbexConverterStat&) = default;
+  IbexConverterStat& operator=(IbexConverterStat&&) = default;
+  ~IbexConverterStat() override {
+    if (enabled()) {
+      using fmt::print;
+      print(cout, "{:<45} @ {:<20} = {:>15}\n", "Total # of Convert",
+            "Ibex Converter", num_convert_);
+      if (num_convert_ > 0) {
+        print(cout, "{:<45} @ {:<20} = {:>15f} sec\n",
+              "Total time spent in Converting", "Ibex Converter",
+              timer_convert_.seconds());
+      }
+    }
+  }
+
+  int num_convert_{0};
+  Timer timer_convert_;
+};
+}  // namespace
 
 IbexConverter::IbexConverter(const vector<Variable>& variables)
     : vars_{variables} {
@@ -49,6 +79,10 @@ IbexConverter::~IbexConverter() {
 
 const ExprCtr* IbexConverter::Convert(const Formula& f) {
   DREAL_LOG_DEBUG("IbexConverter::Convert({})", f);
+  static IbexConverterStat stat{DREAL_LOG_INFO_ENABLED};
+  TimerGuard timer_guard(&stat.timer_convert_, stat.enabled());
+  ++stat.num_convert_;
+
   const ExprCtr* expr_ctr{Visit(f, true)};
   if (expr_ctr) {
     need_to_delete_variables_ = false;
@@ -139,6 +173,39 @@ const ExprNode* IbexConverter::VisitAddition(const Expression& e) {
   return ret;
 }
 
+const ExprNode* IbexConverter::ProcessPow(const Expression& base,
+                                          const Expression& exponent) {
+  // Note: IBEX provides the following four function signatures of pow
+  // in "ibex_Expr.h" file. To obtain precision, we try to avoid call
+  // the last one, "pow(EXPR, EXPR)".
+  //
+  //   1. pow(EXPR, int)
+  //   2. pow(EXPR, double)
+  //   3. pow(double, EXPR)
+  //   4. pow(EXPR, EXPR)
+  if (is_constant(exponent)) {
+    const double v{get_constant_value(exponent)};
+    if (is_integer(v)) {
+      // Call 1. pow(EXPR, int).
+      return &pow(*Visit(base), static_cast<int>(v));
+    }
+    if (v == 0.5) {
+      // Call sqrt(base).
+      return &sqrt(*Visit(base));
+    } else {
+      // Call 2. pow(EXPR, double).
+      return &pow(*Visit(base), v);
+    }
+  }
+  if (is_constant(base)) {
+    // Call 3. pow(double, EXPR).
+    const double v{get_constant_value(base)};
+    return &pow(v, *Visit(exponent));
+  }
+  // Call 4. pow(EXPR, EXPR).
+  return &pow(*Visit(base), *Visit(exponent));
+}
+
 const ExprNode* IbexConverter::VisitMultiplication(const Expression& e) {
   const double c{get_constant_in_multiplication(e)};
   const ExprNode* ret{nullptr};
@@ -148,31 +215,10 @@ const ExprNode* IbexConverter::VisitMultiplication(const Expression& e) {
   for (const auto& p : get_base_to_exponent_map_in_multiplication(e)) {
     const Expression& base{p.first};
     const Expression& exponent{p.second};
-    if (is_constant(exponent)) {
-      const double v{get_constant_value(exponent)};
-      if (is_integer(v)) {
-        const ExprNode& term{pow(*Visit(base), static_cast<int>(v))};
-        if (ret) {
-          ret = &(*ret * term);
-        } else {
-          ret = &term;
-        }
-      }
-      if (v == 0.5) {
-        const ExprNode& term{sqrt(*Visit(base))};
-        if (ret) {
-          ret = &(*ret * term);
-        } else {
-          ret = &term;
-        }
-      }
+    if (ret) {
+      ret = &(*ret * *ProcessPow(base, exponent));
     } else {
-      const ExprNode& term{pow(*Visit(base), *Visit(exponent))};
-      if (ret) {
-        ret = &(*ret * term);
-      } else {
-        ret = &term;
-      }
+      ret = ProcessPow(base, exponent);
     }
   }
   return ret;
@@ -201,16 +247,7 @@ const ExprNode* IbexConverter::VisitSqrt(const Expression& e) {
 const ExprNode* IbexConverter::VisitPow(const Expression& e) {
   const Expression& base{get_first_argument(e)};
   const Expression& exponent{get_second_argument(e)};
-  if (is_constant(exponent)) {
-    const double v{get_constant_value(exponent)};
-    if (is_integer(v)) {
-      return &pow(*Visit(base), static_cast<int>(v));
-    }
-    if (v == 0.5) {
-      return &sqrt(*Visit(base));
-    }
-  }
-  return &pow(*Visit(base), *Visit(exponent));
+  return ProcessPow(base, exponent);
 }
 
 const ExprNode* IbexConverter::VisitSin(const Expression& e) {
